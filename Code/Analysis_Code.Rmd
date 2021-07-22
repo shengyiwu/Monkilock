@@ -1,0 +1,484 @@
+---
+title: "Monkilock Analysis"
+output:
+  html_document:
+    df_print: paged
+---
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, fig.path = '../images/')
+```
+
+### load packages and data
+```{r}
+## load packages (data processing in jupyter notebook)
+library(tidyr)
+library(dplyr)
+library(boot)
+library(lme4)
+library(Hmisc)
+library(mgcv)
+library(ggplot2)
+source("helper-lib.R")
+
+## load reprocessed csv data
+path <- "/Users/shengyi/Desktop/Kidd/MonkeyData/"
+d <- read.csv(paste(path, "csv-surprisal-prob.csv",sep = ""), header=TRUE)
+
+# Standardize trial
+d$std_trial <- stdize(d$trial)
+# Standardize seq_item
+d$std_seq_item <- stdize(d$seq_item)
+# Standardize distance
+d$std_dist <- stdize(d$dist)
+# Create standard unseen items
+d$std_unseen <- stdize(d$unseen_item)
+
+# type change -> from boolean in python to numerial
+d$repeated <- NULL
+d$repeated <- ifelse(d$active_item==d$prev_active, 1, 0)
+d$firstappear <- ifelse(d$firstappear == "True", 1, 0)
+
+## create bins and get weighted mean
+mybin <- function(x, bins) {
+	as.numeric(as.character(cut2(x, seq(min(x, na.rm=T), max(x, na.rm=T), (max(x, na.rm=T)-min(x, na.rm=T) + 0.001)/bins), levels.mean=T)))
+}
+
+#[0.0526,1.4057)
+#[1.4057,2.7588)
+#[2.7588,4.1109]
+
+d$binned_surprisal_means <- mybin(d$surprisal, 3)
+d$binned_bisurprisal_means <- mybin(d$bisurprisal, 3)
+d <- subset(d, select = -binned_surprisal)
+d <- subset(d, select = -binned_bisurprisal)
+
+d$subj <- as.factor(d$subj)
+d$repeated <- as.factor(d$repeated)
+contrasts(d$repeated) <- contr.sum(2)
+d$firstappear <- as.factor(d$firstappear)
+contrasts(d$firstappear) <- contr.sum(2)
+
+head(d)
+# write.csv(d,"/Users/shengyi/Desktop/Kidd/MonkeyData/csv-surprisal-prob_updated.csv", row.names = FALSE)
+```
+
+
+### Analysis
+#### Predictive looks
+##### - whether the monkey was already looking at the current object area when it first became active (before the pop-up)
+##### - excluding events in the sequence that were immediate repeats of the same object that was most recently active. 
+
+```{r}
+## get rid of those without prev-active
+a <- d[!is.na(d$prev_active),]
+q <- a[(a$repeated==0 & !is.na(a$already_there)),]
+
+aggregated_surprisal <- aggregate.binomial(q$already_there, by=list(q$binned_surprisal_means))
+aggregated_bisurprisal <- aggregate.binomial(q$already_there, by=list(q$binned_bisurprisal_means))
+
+### Unigram -> already_there vs surprisal
+ggplot(q, aes(x = surprisal, y=already_there)) + 
+  geom_smooth(method = "lm", col = "red", se=TRUE, size = 0.5) +
+  geom_pointrange(data=aggregated_surprisal[,-2], mapping=aes(x=x, y=p, ymin=lower, ymax=upper),size=0.5, color="blue")+
+  labs(
+       y="P(already there)", 
+       x="Unigram Surprisal (-log prob)") +
+  theme_classic()
+
+
+### Bigram -> already_there vs surprisal
+ggplot(q, aes(x = bisurprisal, y=already_there)) + 
+  geom_smooth(method = "lm", col = "red", se=TRUE, size = 0.5) +
+  geom_pointrange(data=aggregated_bisurprisal[,-2], mapping=aes(x=x, y=p, ymin=lower, ymax=upper),size=0.5, color="blue")+
+  labs(
+       y="P(already there)", 
+       x="Bigram Surprisal (-log prob)") +
+  theme_classic()
+
+### Unigram -> already there vs surprisal (first appearance or not)
+ggplot(q, aes(x = surprisal, y=already_there)) + 
+  geom_smooth(data = q[q$firstappear == 1,], method = "lm", formula=y ~ poly(x, 2, raw=TRUE), aes(col = "True"), se=FALSE, size = 0.5) +
+  geom_smooth(data = q[q$firstappear == 0,], method = "lm", formula=y ~ poly(x, 2, raw=TRUE), aes(col = "False"), se=FALSE, size = 0.5) +
+  labs(
+       y="P(already there)", 
+       x="Unigram Surprisal (-log prob)") +
+  theme_classic() +
+  scale_colour_manual(name="Fist Appearance", values=c("red", "blue"))
+
+### Bigram -> already there vs surprisal (first appearance or not)
+ggplot(q, aes(x = bisurprisal, y=already_there)) + 
+  geom_smooth(data = q[q$firstappear == 1,], method = "lm", formula=y ~ poly(x, 2, raw=TRUE), aes(col = "True"), se=FALSE, size = 0.5) +
+  geom_smooth(data = q[q$firstappear == 0,], method = "lm", formula=y ~ poly(x, 2, raw=TRUE), aes(col = "False"), se=FALSE, size = 0.5) +
+  labs(
+       y="P(already there)", 
+       x="Biigram Surprisal (-log prob)") +
+  theme_classic() +
+  scale_colour_manual(name="Fist Appearance", values=c("red", "blue"))
+
+```
+
+```{r}
+## predictive look for object have not appeared yet
+pred_firstAppear <- q[q$firstappear == 1,]
+pred_notfirstAppear <- q[q$firstappear == 0,]
+
+pred_firstAppear$binned_surprisal_means <- mybin(pred_firstAppear$surprisal, 3)
+pred_firstAppear$binned_bisurprisal_means <- mybin(pred_firstAppear$bisurprisal, 3)
+
+aggregated_surprisal_first <- aggregate.binomial(pred_firstAppear$already_there, by=list(pred_firstAppear$binned_surprisal_means))
+aggregated_bisurprisal_first <- aggregate.binomial(pred_firstAppear$already_there, by=list(pred_firstAppear$binned_bisurprisal_means))
+
+aggregated_surprisal_notfirst <- aggregate.binomial(pred_notfirstAppear$already_there, by=list(pred_notfirstAppear$binned_surprisal_means))
+aggregated_bisurprisal_notfirst <- aggregate.binomial(pred_notfirstAppear$already_there, by=list(pred_notfirstAppear$binned_bisurprisal_means))
+
+pred_firstAppear[pred_firstAppear$seq == 2,]
+plot(pred_firstAppear$seq_item, pred_firstAppear$surprisal)
+nrow(pred_firstAppear[pred_firstAppear$already_there ==1,]) / nrow(pred_firstAppear)
+
+## unigram
+summary(glmer(already_there ~ std_surprisal + sq_std_surprisal + (1 + std_surprisal + sq_std_surprisal|subj), data=pred_firstAppear ,family=binomial))
+
+summary(glmer(already_there ~ std_trial + std_seq_item + std_dist + std_unseen + std_surprisal + sq_std_surprisal + (1 + std_surprisal + sq_std_surprisal|subj), data=pred_firstAppear, family=binomial))
+
+
+## bigram
+summary(glmer(already_there ~ std_bisurprisal + sq_std_bisurprisal + (1 + std_bisurprisal + sq_std_bisurprisal|subj), data=pred_firstAppear ,family=binomial))
+
+summary(glmer(already_there ~ std_trial + std_seq_item + std_dist + std_unseen + std_bisurprisal + sq_std_bisurprisal + (1 + std_bisurprisal + sq_std_bisurprisal|subj), data=pred_firstAppear, family=binomial))
+
+path <- "/Users/shengyi/Desktop/Kidd/MonkeyData/rt_lookaway_plot_shengyi/useful/"
+pdf(paste(path, "already_there_firstAppeared_unigram_new_bin.pdf",sep = ""), width=8, height=6)
+plotgam(pred_firstAppear$surprisal, pred_firstAppear$already_there, ylab="P(Predictive look)", ylim=c(0.0, 0.2), xlim=c(1, 4.2), xlab="Surprisal (-log prob)", title = "")
+berr <- aggregate.binomial(pred_firstAppear$already_there, by=list(pred_firstAppear$binned_surprisal))
+## berr$x -> x axis value; berr$p -> binomial probability of happening; berr$lower/upper -> 95% CI
+errbar(berr$x, berr$p, berr$lower, berr$upper, pch=18, cex=1.8, col="#04899c", add=TRUE)
+dev.off()
+
+
+pdf(paste(path,"already_there_firstAppeared_bigram_new_bin.pdf",sep = ""), width=8, height=8)
+plotgam(pred_firstAppear$bisurprisal, pred_firstAppear$already_there, ylab="P(Predictive look)", ylim=c(0., 0.2), xlim=c(1, 4.2), xlab="Surprisal (-log prob)")
+errbar(aggregated_bisurprisal_first$x, aggregated_bisurprisal_first$p, aggregated_bisurprisal_first$lower, aggregated_bisurprisal_first$upper, pch=18, cex=1.8, col="#04899c", add=TRUE)
+dev.off()
+
+
+#pdf(paste(path,"predictivelook_firstAppearOrNot.pdf",sep = ""), width=8, height=8)
+plotgam(pred_firstAppear$surprisal, pred_firstAppear$already_there, ylab="P(Predictive look)", ylim=c(-0.1, 0.3), xlim=c(0, 4.2), xlab="Surprisal (-log prob)",lty=2)
+errbar(aggregated_surprisal_first$x, aggregated_surprisal_first$p, aggregated_surprisal_first$lower, aggregated_surprisal_first$upper, pch=18, cex=1.8, errbar.col="#ed265a", col="#ed265a", add=TRUE)
+par(new=TRUE)
+plotgam(pred_notfirstAppear$bisurprisal, pred_notfirstAppear$already_there, ylab="P(Predictive look)", ylim=c(-0.1, 0.3), xlim=c(0, 4.2), xlab="Surprisal (-log prob)",lty = 4, col="#6d90f3")
+errbar(aggregated_surprisal_notfirst$x, aggregated_surprisal_notfirst$p, aggregated_surprisal_notfirst$lower, aggregated_surprisal_notfirst$upper, pch=18, cex=1.8, errbar.col="#265aed", col="#265aed", add=TRUE)
+legend(2.7, 0.3, legend=c("First Appeared", "Not First Appeared"),
+       col=c("#f36d90", "#6d90f3"), lty=2:4, cex=1, box.lty=0)
+#dev.off()
+
+pdf(paste(path,"already_there_firstAppeared_unigram_controlled_new_bin.pdf",sep = ""), width=8, height=8)
+plotgam.controlled( already_there ~ std_trial + std_seq_item + std_dist + std_unseen , "surprisal", pred_firstAppear, ylim=c(-0.2, 0.2), ylab="P(Predictive look)", xlim=c(1, 4.2), xlab="Surprisal (-log prob)")
+dev.off()
+
+pdf(paste(path,"already_there_firstAppeared_bigram_controlled_new_bin.pdf",sep = ""), width=8, height=8)
+plotgam.controlled( already_there ~ std_trial + std_seq_item + std_dist + std_unseen , "bisurprisal", pred_firstAppear, ylim=c(-0.2, 0.2), ylab="P(Predictive look)", xlim=c(1, 4.2), xlab="Surprisal (-log prob)")
+dev.off()
+```
+
+
+
+```{r}
+### Unigram predictive look
+## Unigram Raw Predictive-Look Regression
+summary(glmer(already_there ~ std_surprisal + sq_std_surprisal + (1 + std_surprisal + sq_std_surprisal|subj), data=q ,family=binomial))
+
+## Unigram Controlled Predictive-Look Regression
+summary(glmer(already_there ~ firstappear + std_trial + std_seq_item + std_dist + std_unseen + std_surprisal + sq_std_surprisal + (1 + std_surprisal + sq_std_surprisal|subj), data=q, family=binomial)) 
+
+## Unigram Without Quadradic 
+summary(glmer(already_there ~ firstappear + std_trial + std_seq_item + std_dist + std_unseen + std_surprisal + (1 + std_surprisal |subj), data=q, family="binomial")) 
+```
+
+```{r}
+### GAM predictive look
+#pdf("/Users/shengyi/Desktop/Kidd/MonkeyData/rt_lookaway_plot_shengyi/predictivelook_unigram_3.pdf", width=8, height=8)
+plotgam(q$surprisal, q$already_there, ylab="P(Predictive look)", ylim=c(0, 0.2), xlim=c(0, 4.2), xlab="Surprisal (-log prob)")
+berr <- aggregate.binomial(q$already_there, by=list(q$binned_surprisal))
+errbar(berr$x, berr$p, berr$lower, berr$upper, pch=18, cex=1.8, col="#04899c", add=TRUE)
+
+
+##controlled
+#pdf("/Users/shengyi/Desktop/Kidd/MonkeyData/rt_lookaway_plot_shengyi/predictivelook_unigram_controlled.pdf", width=8, height=8)
+plotgam.controlled( already_there ~ firstappear + std_trial + std_seq_item + std_dist + std_unseen , "surprisal", q, ylim=c(-0.2, 0.2), ylab="P(Predictive look)", xlim=c(0, 4.2), xlab="Unigram Surprisal (-log prob)")
+#dev.off()
+```
+
+
+```{r}
+### Bigram predictive look
+## Transitional Raw Predictive-Look Regression
+summary(glmer(already_there ~ std_bisurprisal + sq_std_bisurprisal + (1 + std_bisurprisal + sq_std_bisurprisal|subj), data=q, family="binomial"))
+
+## Transitional Controlled Predictive-Look Regression
+summary(glmer(already_there ~ firstappear + std_trial + std_seq_item + std_dist + std_unseen +std_bisurprisal + sq_std_bisurprisal + (1 + std_bisurprisal + sq_std_bisurprisal|subj), data=q, family="binomial"))
+
+# Transitional Without Quadradic
+summary(glmer(already_there ~ firstappear + std_trial + std_seq_item + std_dist + std_unseen +std_bisurprisal + (1 + std_bisurprisal |subj), data=q, family="binomial"))
+
+#pdf("/Users/shengyi/Desktop/Kidd/MonkeyData/rt_lookaway_plot_shengyi/predictivelook_bigram_3.pdf", width=8, height=8)
+plotgam(q$bisurprisal, q$already_there, ylab="P(Predictive look)", ylim=c(0, 0.2), xlim=c(0, 4.2), xlab="Surprisal (-log prob)")
+berr <- aggregate.binomial(q$already_there, by=list(q$binned_bisurprisal))
+errbar(berr$x, berr$p, berr$lower, berr$upper, pch=18, cex=1.8, col="#04899c", add=TRUE)
+#dev.off()
+
+#pdf("/Users/shengyi/Desktop/Kidd/MonkeyData/rt_lookaway_plot_shengyi/predictivelook_bigram_controlled.pdf", width=8, height=8)
+plotgam.controlled( already_there ~ firstappear + std_trial + std_seq_item + std_dist + std_unseen , "bisurprisal", q, ylim=c(-0.2, 0.2), ylab="P(Predictive look)", xlim=c(0, 4.2), xlab="Surprisal (-log prob)")
+#dev.off()
+```
+
+#### Reaction Time
+```{r}
+q <- d[d$rt>0,]
+
+aggregate_rt <- aggregate2(q$rt, by=list(q$binned_surprisal)) # defaultly mean and stderr
+aggregate_rt_bi <- aggregate2(q$rt, by=list(q$binned_bisurprisal))
+
+### Unigram -> rt vs surprisal
+ggplot(q, aes(x = surprisal, y=rt)) + 
+  geom_smooth(method = "lm", formula=y ~ poly(x, 2, raw=TRUE), col = "red", se=TRUE, size = 0.5) +
+  geom_pointrange(data=aggregate_rt, mapping=aes(x=x, y=mean, ymin=mean-stderr, ymax=mean+stderr),size=0.5, color="blue")+
+  labs(
+       y="Reaction Time (ms)", 
+       x="Unigram Surprisal (-log prob)") +
+  theme_classic()
+
+### Bigram -> rt vs bisurprisal
+ggplot(q, aes(x = bisurprisal, y=rt)) + 
+  geom_smooth(method = "lm", formula=y ~ poly(x, 2, raw=TRUE), col = "red", se=TRUE, size = 0.5) +
+  geom_pointrange(data=aggregate_rt_bi, mapping=aes(x=x, y=mean, ymin=mean-stderr, ymax=mean+stderr),size=0.5, color="blue")+
+  labs(
+       y="Reaction Time (ms)", 
+       x="Bigram Surprisal (-log prob)") +
+  theme_classic()
+
+### Unigram -> rt vs surprisal (first appearance or not)
+ggplot(q, aes(x = surprisal, y=rt)) + 
+  geom_smooth(data = q[q$firstappear == 1,], method = "lm", formula=y ~ poly(x, 2, raw=TRUE), aes(col = "True"), se=FALSE, size = 0.5) +
+  geom_smooth(data = q[q$firstappear == 0,], method = "lm", formula=y ~ poly(x, 2, raw=TRUE), aes(col = "False"), se=FALSE, size = 0.5) +
+  labs(
+       y="Reaction Time (ms)", 
+       x="Unigram Surprisal (-log prob)") +
+  theme_classic() +
+  scale_colour_manual(name="Fist Appearance", values=c("red", "blue"))
+#### the above plot looks like there might be some different pattern for first appearance or not for reaction time vs surprisal. but models and plots for generalized linear model do not show any significant results.
+```
+
+
+```{r}
+### Unigram models reaction time
+library('lmerTest')
+q <- d[d$rt>0,]
+
+## Unigram Raw Reaction-Time Regression.
+rt_model_unigram <- lmer(rt ~ std_surprisal + sq_std_surprisal + (1+std_surprisal+sq_std_surprisal|subj), data=q)
+
+summary(rt_model_unigram)
+anova(rt_model_unigram)
+```
+
+```{r}
+## Unigram Controlled Reaction-Time Regression
+rt_model_unigram_control <- lmer(rt ~ repeated + firstappear + std_trial + std_seq_item + std_dist + std_unseen + std_surprisal + sq_std_surprisal + (1 + std_surprisal + sq_std_surprisal|subj), data=q)
+
+library("lme4")
+packageVersion("lme4")
+
+getME(rt_model_unigram_control,"theta")
+tt <- getME(rt_model_unigram_control,"theta")
+ll <- getME(rt_model_unigram_control,"lower")
+min(tt[ll==0])
+
+summary(rt_model_unigram_control)
+anova(rt_model_unigram_control)
+```
+
+```{r}
+### all reached approximately the same parameter estimates (more than one different optmizer -> no need to worry about convergence failure)
+## https://stackoverflow.com/questions/33790402/convergence-error-on-lme4
+summary(lmer(rt ~ repeated + firstappear + std_trial + std_seq_item + std_dist + std_unseen + std_surprisal + sq_std_surprisal + (1 + std_surprisal + sq_std_surprisal|subj), data=q, control = lmerControl(optimizer="optimx", optCtrl=list(method="nlminb"))))
+
+summary(lmer(rt ~ repeated + firstappear + std_trial + std_seq_item + std_dist + std_unseen + std_surprisal + sq_std_surprisal + (1 + std_surprisal + sq_std_surprisal|subj), data=q,control = lmerControl(optimizer="Nelder_Mead")))
+
+summary(lmer(rt ~ repeated + firstappear + std_trial + std_seq_item + std_dist + std_unseen + std_surprisal + sq_std_surprisal + (1 + std_surprisal + sq_std_surprisal|subj), data=q,control = lmerControl(optimizer="bobyqa")))
+
+```
+
+```{r}
+### GAM reaction time unigram
+pdf("/Users/shengyi/Desktop/Kidd/MonkeyData/rt_lookaway_plot_shengyi/useful/rt_unigram_3.pdf", width=8, height=6)
+plotgam(q$surprisal, q$rt, ylab="Reaction Time (ms)", ylim=c(300, 600), xlab="Surprisal (-log prob)", col="#a4a501",title="a")
+rt.plot <- aggregate2(q$rt, by=list(q$binned_surprisal)) # defaultly mean and stderr
+errbar2(rt.plot$x, rt.plot$mean, rt.plot$mean-rt.plot$stderr, rt.plot$mean+rt.plot$stderr, pch=18, cex=1.8, add=TRUE, col="#60016D")
+dev.off()
+
+pdf("/Users/shengyi/Desktop/Kidd/MonkeyData/rt_lookaway_plot_shengyi/useful/rt_unigram_controlled.pdf", width=8, height=6)
+plotgam.controlled( rt ~ repeated + firstappear + std_trial + std_seq_item + std_dist + std_unseen , "surprisal", q,ylim=c(-100, 100), ylab="Reaction Time (ms)", xlim=c(0, 4.2), xlab="Surprisal (-log prob)", title="b")
+dev.off()
+```
+
+```{r}
+### Bigram reaction time
+q <- d[d$rt>0,]
+
+## Transitional Raw Reaction-Time Regression
+summary(lmer(rt ~ std_bisurprisal + sq_std_bisurprisal + (1 + std_bisurprisal + sq_std_bisurprisal|subj), data=q))
+
+## Transitional Controlled Reaction-Time Regression
+summary(lmer(rt ~ repeated + firstappear + std_trial + std_seq_item + std_dist + std_unseen + std_bisurprisal + sq_std_bisurprisal + (1 + std_bisurprisal + sq_std_bisurprisal|subj), data=q))
+
+### GAM reaction time bigram
+pdf("/Users/shengyi/Desktop/Kidd/MonkeyData/rt_lookaway_plot_shengyi/useful/rt_bigram_3.pdf", width=8, height=8)
+plotgam(q$bisurprisal, q$rt, ylab="Reaction Time (ms)", ylim=c(300, 600), xlab="Surprisal (-log prob)", col="#a4a501")
+rt.plot <- aggregate2(q$rt, by=list(q$binned_bisurprisal)) # defaultly mean and stderr
+errbar2(rt.plot$x, rt.plot$mean, rt.plot$mean-rt.plot$stderr, rt.plot$mean+rt.plot$stderr, pch=18, cex=1.8, add=TRUE, col="#60016D")
+dev.off()
+
+#pdf("/Users/shengyi/Desktop/Kidd/MonkeyData/rt_lookaway_plot_shengyi/rt_bigram_controlled.pdf", width=8, height=8)
+plotgam.controlled( rt ~ repeated + firstappear + std_trial + std_seq_item + std_dist + std_unseen , "bisurprisal", q,ylim=c(-100, 100), ylab="Reaction Time (ms)", xlim=c(0, 4.2), xlab="Surprisal (-log prob)")
+#dev.off()
+```
+
+
+#### Look Away
+
+```{r}
+d[d$looks_away == 'False',]$looks_away <- 0
+d[d$looks_away == 'True',]$looks_away <- 1
+d$looks_away <- as.numeric(d$looks_away)
+
+aggregate_lookaway <- aggregate.binomial(d$looks_away, by=list(d$binned_surprisal))
+aggregate_lookaway_bi <- aggregate.binomial(d$looks_away, by=list(d$binned_bisurprisal))
+
+### Unigram -> look away vs surprisal
+ggplot(d, aes(x = surprisal, y=looks_away)) + 
+  geom_smooth(method = "lm", formula=y ~ poly(x, 2, raw=TRUE), col = "red", se=TRUE, size = 0.5) +
+  geom_pointrange(data=aggregate_lookaway[,-2], mapping=aes(x=x, y=p, ymin=lower, ymax=upper),size=0.5, color="blue")+
+  labs(
+       y="P(Look Away)", 
+       x="Unigram Surprisal (-log prob)") +
+  theme_classic()
+
+### Bigram -> look away vs bisurprisal
+ggplot(d, aes(x = bisurprisal, y=looks_away)) + 
+  geom_smooth(method = "lm", formula=y ~ poly(x, 2, raw=TRUE), col = "red", se=TRUE, size = 0.5) +
+  geom_pointrange(data=aggregate_lookaway_bi[,-2], mapping=aes(x=x, y=p, ymin=lower, ymax=upper),size=0.5, color="blue")+
+  labs(
+       y="P(Look Away)", 
+       x="Bigram Surprisal (-log prob)") +
+  theme_classic()
+
+## unigram --- P(look away)
+pdf("/Users/shengyi/Desktop/Kidd/MonkeyData/rt_lookaway_plot_shengyi/useful/lookaway_unigram_3.pdf", width=8, height=6)
+plotgam(d$surprisal, d$looks_away, ylab="P(Look-away)", ylim=c(0.5, 0.9), xlab="Surprisal (-log prob)",title = "a")
+berr <- aggregate.binomial(d$looks_away, by=list(d$binned_surprisal))
+errbar2(berr$x, berr$p, berr$lower, berr$upper, pch=18, cex=1.8, add=TRUE, col="#04899c")
+dev.off()
+
+## bigram --- P(look away)
+pdf("/Users/shengyi/Desktop/Kidd/MonkeyData/rt_lookaway_plot_shengyi/useful/lookaway_bigram_3.pdf", width=8, height=8)
+plotgam(d$bisurprisal, d$looks_away, ylab="P(Look-away)", ylim=c(0.5, 0.9), xlab="Surprisal (-log prob)")
+errbar2(aggregate_lookaway_bi$x, aggregate_lookaway_bi$p, aggregate_lookaway_bi$lower, aggregate_lookaway_bi$upper, pch=18, cex=1.8, add=TRUE, col="#04899c")
+dev.off()
+
+pdf("/Users/shengyi/Desktop/Kidd/MonkeyData/rt_lookaway_plot_shengyi/useful/lookaway_unigram_controlled.pdf", width=8, height=6)
+plotgam.controlled( looks_away ~ repeated + firstappear + std_trial + std_seq_item + std_dist + std_unseen, "surprisal", d, ylim=c(-0.1, 0.1), ylab="P(Look-away)", xlim=c(0, 4.2), xlab="Surprisal (-log prob)", title = "b") 
+dev.off()
+
+#pdf("/Users/shengyi/Desktop/Kidd/MonkeyData/rt_lookaway_plot_shengyi/lookaway_bigram_controlled.pdf", width=8, height=8)
+plotgam.controlled( looks_away ~ repeated + firstappear + std_trial + std_seq_item + std_dist + std_unseen, "bisurprisal", d, ylim=c(-0.1, 0.1), ylab="P(Look-away)", xlim=c(0, 4.2), xlab="Surprisal (-log prob)") 
+#dev.off()
+
+
+### unigram bysubject
+#pdf(file='/Users/shengyi/Desktop/Kidd/MonkeyData/rt_lookaway_plot_shengyi/BySubj-Unigram.pdf', height=10, width=4)
+
+# Parse the "file" field
+filenames <- basename(d$file) # get the file name itself
+d$subj<- as.factor(substr(filenames, 0,1))
+par(mfrow=c(5,2), mar=c(4.5,4.5,2,2)) ## TODO: Change this if we change the number of subjects
+for(ds in split(d, d$subj)) {
+
+	plotgam(ds$surprisal, ds$looks_away, ylab="P(Look-away)", ylim=c(0.3, 1.0), xlab="Surprisal (-log prob)", cex.lab=1, cex=1, cex.axis=1, lwd=1.5, main=ds$subj[1])
+	berr <- aggregate.binomial(ds$looks_away, by=list(ds$binned_surprisal))
+	errbar2(berr$x, berr$p, berr$lower, berr$upper, pch=18, cex=1.5, add=TRUE, col="#025867")
+
+	#bitmap("fig.png", height=5, width=5)
+
+	## PLOT 2 - Time to target
+	qs <- ds[ds$rt>0,]
+
+	plotgam(qs$surprisal, qs$rt, ylab="RT", ylim=c(250, 600), xlab="Surprisal (-log prob)", cex.lab=1, cex=1, cex.axis=1, lwd=1.5, main=ds$subj[1])
+	rt.plot <- aggregate2(qs$rt, by=list(qs$binned_surprisal)) # defaultly mean and stderr
+	errbar2(rt.plot$x, rt.plot$mean, rt.plot$mean-rt.plot$stderr, rt.plot$mean+rt.plot$stderr, pch=18, cex=1.5, lwd=1, lty=1, add=TRUE, col="#025867")
+}
+#dev.off()
+
+### bigram bysubject
+#pdf(file='/Users/shengyi/Desktop/Kidd/MonkeyData/rt_lookaway_plot_shengyi/BySubj-Bigram.pdf', height=10, width=4)
+
+filenames <- basename(d$file) # get the file name itself
+d$subj    <- as.factor(substr(filenames, 0,1))
+
+par(mfrow=c(5,2), mar=c(4.5,4.5,2,2)) ## TODO: Change this if we change the number of subjects
+for(ds in split(d, d$subj)) {
+
+  # Look-away 
+	plotgam(ds$bisurprisal, ds$looks_away, ylab="P(Look-away)", ylim=c(0.3, 1.0), xlab="Surprisal (-log prob)", cex.lab=1, cex=1, cex.axis=1, lwd=1.5, main=ds$subj[1])
+	berr <- aggregate.binomial(ds$looks_away, by=list(ds$binned_bisurprisal))
+	errbar2(berr$x, berr$p, berr$lower, berr$upper, pch=18, cex=1.5, add=TRUE, col="#025867")
+
+  # Time till target
+	qs <- ds[ds$rt>0,]
+	plotgam(qs$bisurprisal, qs$rt, ylab="RT", ylim=c(250, 600), xlab="Surprisal (-log prob)", cex.lab=1, cex=1, cex.axis=1, lwd=1.5, main=ds$subj[1])
+	rt.plot <- aggregate2(qs$rt, by=list(qs$binned_bisurprisal)) # defaultly mean and stderr
+	errbar2(rt.plot$x, rt.plot$mean, rt.plot$mean-rt.plot$stderr, rt.plot$mean+rt.plot$stderr, pch=18, cex=1.5, lwd=1, lty=1, add=TRUE, col="#025867")
+}
+#dev.off()
+```
+
+```{r}
+### Unigram look-away
+## unigram raw look-away regression
+summary(glmer(looks_away ~ std_surprisal + sq_std_surprisal + (1+std_surprisal + sq_std_surprisal|subj), data=d, family="binomial"))
+
+## Unigram Controlled Look-Away Regression 
+summary(glmer(looks_away ~ repeated + firstappear + std_trial + std_seq_item + std_dist + std_unseen + std_surprisal + sq_std_surprisal + (1 + std_surprisal + sq_std_surprisal | subj), data=d, family="binomial"))
+
+### unigram controlled without linear
+summary(glmer(looks_away ~ repeated + firstappear + std_trial + std_seq_item + std_dist + std_unseen + sq_std_surprisal + (1 + sq_std_surprisal | subj), data=d, family="binomial"))
+
+### unigram controlled without quadratic
+summary(glmer(looks_away ~ repeated + firstappear + std_trial + std_seq_item + std_dist + std_unseen + std_surprisal + (1 + std_surprisal | subj), data=d, family="binomial"))
+```
+
+```{r}
+### Bigram look-away
+## Transitional Raw Look-Away Regression
+summary(glmer(looks_away ~ std_bisurprisal + sq_std_bisurprisal + (1 + std_bisurprisal + sq_std_bisurprisal|subj), data=d, family="binomial"))
+
+## Transitional Controlled Look-Away Regression
+summary(glmer(looks_away ~ repeated + firstappear + std_trial + std_seq_item + std_dist + std_unseen + std_bisurprisal + sq_std_bisurprisal + (1 + std_bisurprisal + sq_std_bisurprisal|subj), data=d, family="binomial"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
