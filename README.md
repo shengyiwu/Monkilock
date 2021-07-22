@@ -1,4 +1,4 @@
-# Monkilock
+# Monkilock, Wu et al., 2021
 This repository contains the codes and data for the Monkilock Project.
 
 ### Codes:
