@@ -4,6 +4,7 @@ This repository contains the codes and data for the Monkilock Project.
 ### Codes:
 - **Monkilock_Data_Processing.ipynb**: In this notebook, we processed raw fixation data of 5 macaques and explored the relationship between their fixation patterns and the "surprisal" of events in a trial
 - **Analysis_Code.Rmd**: Data processing, modeling, visualization
+- **Analysis_Code_updated.Rmd**: Data processing, modeling, visualization *(UPDATE)*
 - **helper-lib.R**: helper functions used in Analysis_Code.Rmd
 
 ### Data:
